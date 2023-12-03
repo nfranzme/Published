@@ -1,0 +1,282 @@
+# load libraries
+```{r message=FALSE, warning=FALSE}
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(stringr)
+library(lme4)
+library(lmerTest)
+library(ggsci)
+library(ggpubr)
+library(lm.beta)
+library(ciftiTools)
+library(patchwork)
+library(data.table)
+library(ggbeeswarm)
+library(ggExtra)
+library(table1)
+```
+
+# define functions
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+Qstage <- function(tau.BL, tau.ROC, connectivity, epicenter.prct){
+  diag(connectivity) = NA
+  
+  # determine epicenter ntile
+  epicenter.ntile = 1/epicenter.prct
+  
+  epicenter = which(ntile(tau.BL, epicenter.ntile) == epicenter.ntile)
+  epicenter.tau = mean(tau.BL[epicenter])
+  
+  # determine epicenter connectivity
+  epicenter.connectivity = as.numeric(colMeans(connectivity[epicenter, ], na.rm = T))
+  epicenter.connectivity[epicenter] = NA
+  Qstage = paste0("Q", ntile(epicenter.connectivity, 4))
+  Qstage[Qstage == "QNA"] <-  "epicenter"
+  
+  
+  # summarize Q ROIs
+  tmp.summary = data.frame(tau.ROC, tau.BL, Qstage) %>% 
+    group_by(Qstage) %>% 
+    summarize(tau.ROC = mean(tau.ROC), tau.BL = mean(tau.BL))
+  return(tmp.summary)
+}
+
+Qstage_indices <- function(tau.BL, tau.ROC, connectivity, epicenter.prct){
+  diag(connectivity) = NA
+  
+  # determine epicenter ntile
+  epicenter.ntile = 1/epicenter.prct
+  
+  epicenter = which(ntile(tau.BL, epicenter.ntile) == epicenter.ntile)
+  epicenter.tau = mean(tau.BL[epicenter])
+  
+  # determine epicenter connectivity
+  epicenter.connectivity = as.numeric(colMeans(connectivity[epicenter, ], na.rm = T))
+  epicenter.connectivity[epicenter] = NA
+  Qstage = paste0("Q", ntile(epicenter.connectivity, 4))
+  Qstage[Qstage == "QNA"] <-  "epicenter"
+  return(Qstage)
+}
+
+
+epicenter_based_tau_spread <- function(tau.BL, tau.ROC, connectivity, epicenter.prct){
+  diag(connectivity) = NA
+  
+  # determine epicenter ntile
+  epicenter.ntile = 1/epicenter.prct
+  epicenter = which(ntile(tau.BL, epicenter.ntile) == epicenter.ntile)
+  
+  # determine epicenter-based tau spreading
+  epicenter.connectivity.raw = as.numeric(colMeans(connectivity[epicenter, ], na.rm = T))
+  epicenter.connectivity.cleaned = epicenter.connectivity.raw
+  epicenter.connectivity.cleaned[epicenter] = NA
+
+  tmp.lm.raw <- lm.beta(lm(tau.ROC ~ epicenter.connectivity.raw))
+  tmp.lm.cleaned <- lm.beta(lm(tau.ROC ~ epicenter.connectivity.cleaned))
+
+  # summarize Q ROIs
+  tmp.summary = data.frame(epicenter_based_tau_spread = tmp.lm.raw$standardized.coefficients["epicenter.connectivity.raw"],
+                           epicenter_based_tau_spread.epi.NA = tmp.lm.cleaned$standardized.coefficients["epicenter.connectivity.cleaned"])
+  return(tmp.summary)
+}
+
+# negate
+`%nin%` = Negate(`%in%`)
+
+
+
+
+```
+
+# ----- SIMULATE DATA ------
+
+## define numbers
+
+```{r}
+number_of_ROIs = 200
+number_of_subjects = 100
+```
+
+## simulate connectivity matrix
+```{r}
+# Generate a random data matrix with values between 0 and 1
+set.seed(42) # Setting seed for reproducibility
+connectivity <- matrix(runif(number_of_ROIs * number_of_ROIs), nrow = number_of_ROIs, ncol = number_of_ROIs)
+
+```
+
+## simulate subject characteristics and CSF biomarker data
+```{r}
+
+# Generate random data for the variables
+set.seed(42) # Setting seed for reproducibility
+
+data = 
+  data.frame(
+    ID = 1:number_of_subjects,
+    age = sample(60:90, number_of_subjects, replace = TRUE),
+    sex = sample(c("male", "female"), number_of_subjects, replace = TRUE),
+    diagnosis = sample(c("CN", "MCI", "Dementia"), number_of_subjects, replace = TRUE),
+    centiloid = sample(0:100, number_of_subjects, replace = TRUE),
+    GAP43 = runif(number_of_subjects),
+    PTAU = runif(number_of_subjects)) %>% 
+  mutate(amyloid_status = mapvalues(centiloid>20, from = c(T,F), to = c("Ab.pos", "Ab.neg")),
+         diagnosis_amyloid_status = paste(diagnosis, amyloid_status, sep = "_"))
+  
+
+
+```
+
+## simulate tau-PET SUVRs and tau-PET change rates
+```{r}
+# Generate random tau PET SUVRs for each ROI for the same subjects
+tau_PET_SUVRs <- matrix(runif(number_of_subjects * number_of_ROIs, min = 0, max = 2), nrow = number_of_subjects)
+
+# Create column names for the tau PET SUVRs matrix
+col_names <- paste("tau.SUVR.Schaefer200.ROI.idx.", 1:number_of_ROIs, sep = "")
+
+# Assign column names to the matrix
+colnames(tau_PET_SUVRs) <- col_names
+
+# Generate random tau PET change rates for each ROI for the same subjects
+tau_PET_SUVRs_ROC <- matrix(runif(number_of_subjects * number_of_ROIs, min = 0, max = 2), nrow = number_of_subjects)
+
+# Create column names for the tau PET change rate matrix
+col_names <- paste("tau.SUVR.Schaefer200.ROI.idx.", 1:number_of_ROIs, ".ROC", sep = "")
+
+# Assign column names to the matrix
+colnames(tau_PET_SUVRs_ROC) <- col_names
+tau_PET_SUVRs_ROC <- as.data.frame(tau_PET_SUVRs_ROC)
+tau_PET_SUVRs_ROC$tau.SUVR.global.ROC = rowMeans(tau_PET_SUVRs_ROC)
+
+# Combine the tau PET SUVRs and change rates with the existing data frame
+data_with_tau <- cbind(data, tau_PET_SUVRs, tau_PET_SUVRs_ROC)
+
+
+
+```
+
+# ----- DATA ANALYSIS ------
+## determine Q1-Q4 and connectivity-mediated tau spreading
+```{r}
+epicenters.and.Qstages = matrix(data =  NA, nrow = nrow(data_with_tau), ncol = 200)
+
+for (i in 1:nrow(data_with_tau)){
+  current.tau.ROC = as.numeric(data_with_tau[i,] %>% select(paste0("tau.SUVR.Schaefer200.ROI.idx.", 1:200, ".ROC")))
+  current.tau.BL = as.numeric(data_with_tau[i,] %>% select(paste0("tau.SUVR.Schaefer200.ROI.idx.", 1:200)))
+  
+  tmp.df = Qstage(tau.BL = current.tau.BL, tau.ROC = current.tau.ROC, connectivity = connectivity, epicenter.prct = 0.05)
+  tmp.df.idx = Qstage_indices(tau.BL = current.tau.BL, 
+                              tau.ROC = current.tau.ROC, 
+                              connectivity = connectivity, 
+                              epicenter.prct = 0.05)
+
+  epicenters.and.Qstages[i,] = tmp.df.idx
+  tmp.df.epi = 
+    epicenter_based_tau_spread(tau.BL = current.tau.BL, 
+                               tau.ROC = current.tau.ROC, 
+                               connectivity = connectivity, 
+                               epicenter.prct = 0.05)
+
+  tmp.df2 <- data.frame(ID = data_with_tau$ID[i],
+                        tau_Q1.ROC = subset(tmp.df, Qstage == "Q1")$tau.ROC,
+                        tau_Q2.ROC = subset(tmp.df, Qstage == "Q2")$tau.ROC,
+                        tau_Q3.ROC = subset(tmp.df, Qstage == "Q3")$tau.ROC,
+                        tau_Q4.ROC = subset(tmp.df, Qstage == "Q4")$tau.ROC,
+                        epicenter_based_tau_spread = tmp.df.epi$epicenter_based_tau_spread,
+                        epicenter_based_tau_spread.epi.NA = tmp.df.epi$epicenter_based_tau_spread.epi.NA)
+  
+  if ( i == 1){tmp.df2.concat = tmp.df2}
+  if ( i> 1){tmp.df2.concat = rbind(tmp.df2.concat, tmp.df2)}
+  
+}
+
+data_with_tau_Q <- merge(data_with_tau, tmp.df2.concat, by = "ID")
+epicenters.and.Qstages <- data.frame(epicenters.and.Qstages)
+epicenters.and.Qstages$ID = data_with_tau$ID
+
+```
+
+## test whether GAP43 is associated with faster amyloid-related tau accumulation
+```{r warning=FALSE}
+
+data_with_tau_Q %>% 
+  mutate(GAP43_bin = mapvalues(ntile(GAP43, 2), from = c(1,2), to = c("<median", ">median"))) %>% 
+  ggplot(
+       aes(x = centiloid,
+           y = tau.SUVR.global.ROC,
+           colour = GAP43_bin)) + 
+  geom_point() + 
+  geom_smooth(method = "lm") + theme_minimal() + scale_color_jama() + labs(colour = "CSF GAP-43") +
+  ylab("Annual rate of change - tau-PET SUVR example ROI")
+
+
+# global ROI
+tmp.lm <- lm.beta(lm(data = data_with_tau_Q,
+                     tau.SUVR.global.ROC ~ GAP43 * centiloid + age + sex + diagnosis_amyloid_status + PTAU)); summary(tmp.lm)
+
+```
+
+
+## test whether GAP43 is associated with faster amyloid-related connectivity-mediated tau spreading
+
+```{r}
+data_with_tau_Q %>% 
+  mutate(GAP43_bin = mapvalues(ntile(GAP43, 2), from = c(1,2), to = c("<median", ">median"))) %>% 
+  ggplot(
+       aes(x = centiloid,
+           y = epicenter_based_tau_spread.epi.NA,
+           colour = GAP43_bin)) + 
+  geom_point() + geom_smooth(method = "lm") + theme_minimal() + scale_color_jama() + ylab("epicenter-based tau spreading") + 
+  labs(colour = "CSF GAP-43")
+
+tmp.lm <- lm.beta(lm(data = data_with_tau_Q,
+                 epicenter_based_tau_spread.epi.NA ~ GAP43 * centiloid + age + sex + diagnosis_amyloid_status + PTAU + centiloid)); summary(tmp.lm)
+
+
+
+```
+
+
+## assess tau accumulation across Q1-Q4 relative to GAP43
+
+```{r}
+
+data_with_tau_Q_long_format <- data_with_tau_Q %>% 
+  mutate(GAP43_bin = mapvalues(as.factor(ntile(GAP43,2)), from = c(1,2), to = c("<median", ">median"))) %>% 
+  select(ID, age, sex, centiloid, diagnosis_amyloid_status,  PTAU, GAP43_bin, tau_Q1.ROC, tau_Q2.ROC, tau_Q3.ROC, tau_Q4.ROC) %>% 
+  melt(id.vars = c("ID", "age", "sex", "centiloid", "diagnosis_amyloid_status", "PTAU", "GAP43_bin"), variable.name = "tau_Q.ROC")
+
+data_with_tau_Q_long_format %>% 
+  ggplot(
+       aes(x = tau_Q.ROC,
+           y = value,
+           colour = GAP43_bin)) + geom_path(aes(group = ID), alpha = 0.15) + 
+  geom_boxplot(alpha = 0.1, outlier.shape = NA) + 
+  geom_beeswarm(dodge.width = 0.75, alpha = 0.5)  + 
+  theme_minimal()  + 
+  scale_colour_jama() + ylab("tau-PET SUVR - annual rate of change") + xlab("Region of interest") + labs(colour = "CSF GAP-43")
+
+
+tmp.aov <- aov(data = subset(data_with_tau_Q_long_format, tau_Q.ROC == "tau_Q1.ROC"),
+                  value ~ GAP43_bin + sex + age + 
+                 diagnosis_amyloid_status + PTAU + centiloid); summary(tmp.aov); TukeyHSD(tmp.aov, which = "GAP43_bin")
+tmp.aov <- aov(data = subset(data_with_tau_Q_long_format, tau_Q.ROC == "tau_Q2.ROC"),
+                  value ~ GAP43_bin + sex + age + 
+                 diagnosis_amyloid_status + PTAU + centiloid); summary(tmp.aov); TukeyHSD(tmp.aov, which = "GAP43_bin")
+tmp.aov <- aov(data = subset(data_with_tau_Q_long_format, tau_Q.ROC == "tau_Q3.ROC"),
+                  value ~ GAP43_bin + sex + age + 
+                 diagnosis_amyloid_status + PTAU + centiloid); summary(tmp.aov); TukeyHSD(tmp.aov, which = "GAP43_bin")
+tmp.aov <- aov(data = subset(data_with_tau_Q_long_format, tau_Q.ROC == "tau_Q4.ROC"),
+                  value ~ GAP43_bin + sex + age + 
+                 diagnosis_amyloid_status + PTAU + centiloid); summary(tmp.aov); TukeyHSD(tmp.aov, which = "GAP43_bin")
+
+
+
+
+```
+
+
+
